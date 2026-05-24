@@ -1,32 +1,93 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"os"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/joho/godotenv"
 )
 
+const appVersion = 0
+
+type settings struct {
+	Port    string
+	AppName string
+	EnvName string
+}
+
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	appName := os.Getenv("APP_NAME")
-	if appName == "" {
-		appName = "go-hello"
-	}
-	envName := os.Getenv("ENV_NAME")
-	if envName == "" {
-		envName = "unknown"
+	_ = godotenv.Load()
+
+	cfg := settings{
+		Port:    env("PORT", "8080"),
+		AppName: env("APP_NAME", "go-hello"),
+		EnvName: env("ENV_NAME", "unknown"),
 	}
 
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok"}`))
+	router := chi.NewRouter()
+	router.Use(middleware.RequestID)
+	router.Use(middleware.RealIP)
+	router.Use(middleware.Logger)
+	router.Use(middleware.Recoverer)
+	router.Use(middleware.Compress(5))
+
+	router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		noStore(w)
+		writeJSON(w, map[string]string{"status": "ok"})
 	})
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		body := fmt.Sprintf(`<!doctype html>
+	router.Get("/version", func(w http.ResponseWriter, r *http.Request) {
+		noStore(w)
+		writeJSON(w, map[string]int{"version": appVersion})
+	})
+
+	router.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		noStore(w)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(page(cfg)))
+	})
+
+	fmt.Printf("%s listening on port %s\n", cfg.AppName, cfg.Port)
+	if err := http.ListenAndServe(":"+cfg.Port, router); err != nil {
+		panic(err)
+	}
+}
+
+func env(key string, fallback string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func noStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	w.Header().Set("Surrogate-Control", "no-store")
+	w.Header().Set("X-App-Version", fmt.Sprintf("%d", appVersion))
+}
+
+func writeJSON(w http.ResponseWriter, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func page(cfg settings) string {
+	appName := html.EscapeString(cfg.AppName)
+	envName := html.EscapeString(cfg.EnvName)
+	renderedAt := html.EscapeString(time.Now().UTC().Format("2006-01-02 15:04:05 UTC"))
+
+	return fmt.Sprintf(`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -85,20 +146,18 @@ func main() {
   <body>
     <main>
       <h1>Hello from %s</h1>
-      <p>This page is served by a minimal Go application deployed through the automated deployment system.</p>
+      <p>This page is served by a Go application deployed through the automated deployment system.</p>
       <dl>
         <dt>Environment</dt>
         <dd>%s</dd>
         <dt>Framework</dt>
-        <dd>Go (stdlib)</dd>
+        <dd>Go + chi</dd>
+        <dt>Version</dt>
+        <dd>%d</dd>
+        <dt>Rendered at</dt>
+        <dd>%s</dd>
       </dl>
     </main>
   </body>
-</html>`, appName, appName, envName)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(body))
-	})
-
-	fmt.Printf("%s listening on port %s\n", appName, port)
-	http.ListenAndServe(":"+port, nil)
+</html>`, appName, appName, envName, appVersion, renderedAt)
 }
